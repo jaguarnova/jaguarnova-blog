@@ -2,6 +2,7 @@
 title: 'AI Agent 从零学（一）：用 Go 手撕 LLM 调用协议'
 pubDate: 2026-09-21
 description: '不用 SDK，用 net/http 调通 chat/completions 与 SSE 流式，再用 openai-go 对比：SDK 到底帮你做了什么、又藏了什么。'
+draft: true
 tags: ['ai-agent', 'go', '学习笔记']
 ---
 
