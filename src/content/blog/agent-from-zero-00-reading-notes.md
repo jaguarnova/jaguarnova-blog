@@ -2,7 +2,6 @@
 title: 'AI Agent 从零学（零）：三篇奠基文献阅读笔记'
 pubDate: 2026-09-21
 description: '开工前的输入：Anthropic 两篇工程复盘 + OpenAI 官方指南，一个 Go 后端工程师的批判性阅读。'
-draft: true
 tags: ['ai-agent', '学习笔记']
 ---
 
