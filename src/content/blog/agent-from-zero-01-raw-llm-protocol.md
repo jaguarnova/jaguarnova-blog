@@ -2,7 +2,6 @@
 title: 'AI Agent 从零学（一）：用 Go 手撕 LLM 调用协议'
 pubDate: 2026-09-21
 description: '不用 SDK，用 net/http 调通 chat/completions 与 SSE 流式，再用 openai-go 对比：SDK 到底帮你做了什么、又藏了什么。'
-draft: true
 tags: ['ai-agent', 'go', '学习笔记']
 ---
 
@@ -73,17 +72,16 @@ for scanner.Scan() {
 
 SDK 版实测与裸 HTTP 一致（86 chunk / 1.05s）。**结论**：SDK 值得用在业务里，但先手写一遍的价值在于——调试时你能看懂 SDK 吞掉的报错、能判断第三方兼容网关的行为是否符合预期。Anthropic 那篇说的"不理解底层抽象的框架依赖是常见错误来源"，就是这个意思。
 
-## 四、三个意外发现（踩坑实录）
+## 四、两个意外发现（踩坑实录）
 
 这是教程不会告诉你、跑起来才有的东西：
 
-1. **响应里的模型名 ≠ 请求的模型名**。我请求 `deepseek-chat`，响应却标 `"model": "deepseek-flash"`——供应商内部会做别名/路由，**不要把响应里的 model 字段当账单依据，以你请求的为准**。
-2. **struct 会静默丢弃未知字段**。切到推理模型请求 `deepseek-reasoner` 时，响应里其实有思维链字段 `reasoning_content`，但我的 struct 没定义它——Go 的 `json.Unmarshal` 直接扔掉了，没有任何报错。程序"正常工作"，数据悄悄丢失。教训：对接协议时先看原始 JSON，再定义 struct；关键字段用 `json.RawMessage` 保底。
-3. **`finish_reason` 语义随模型变**。同一套代码，非推理模型 `stop` 结束，推理模型会把思考也算进 `completion_tokens`（同一段 prompt，token 用量 60 → 206）。做 Agent 的成本预算时必须考虑这一点。
+1. **struct 会静默丢弃未知字段**。切到推理模型请求 `deepseek-reasoner` 时，响应里其实有思维链字段 `reasoning_content`，但我的 struct 没定义它——Go 的 `json.Unmarshal` 直接扔掉了，没有任何报错。程序"正常工作"，数据悄悄丢失。教训：对接协议时先看原始 JSON，再定义 struct；关键字段用 `json.RawMessage` 保底。
+2. **`finish_reason` 语义随模型变**。同一套代码，非推理模型 `stop` 结束，推理模型会把思考也算进 `completion_tokens`（同一段 prompt，token 用量 60 → 206）。做 Agent 的成本预算时必须考虑这一点。
 
 ## 五、下一步
 
-下一项是用 DeepSeek / 通义 / OpenAI 三家实测协议差异（目前只有 DeepSeek 的数据，通义和 OpenAI 的 Key 到位后补实测），以及第一个多轮对话程序。然后进入重头戏：手写工具调用循环。
+下一项是第一个多轮对话程序，然后进入重头戏：手写工具调用循环（Agent Loop）。
 
 ---
 
