@@ -83,7 +83,7 @@ if err := json.Unmarshal([]byte(content), &report); err != nil {
 
 ## 五、主项目 v0：data-agent
 
-学习仓库之外，主项目 [data-agent](https://github.com/jaguarnova/data-agent) 同步启动（v1.3 规划的项目驱动路线）：
+学习仓库之外，主项目 [data-agent](https://github.com/jaguarnova/data-agent) 同步启动，从此所有新能力都沉淀进这个持续演进的项目：
 
 ```
 用户问题 → LLM → Tool Calling → sql_query → PostgreSQL(sales 表) → 回答
