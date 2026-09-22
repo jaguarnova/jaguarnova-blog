@@ -2,7 +2,6 @@
 title: 'AI Agent 从零学（二）：Tool Calling 是怎么跑起来的'
 pubDate: 2026-09-22
 description: '手写 Go 工具调用循环：struct 生成 JSON Schema、tool_calls 协议、错误回传自纠、结构化输出三层防线，主项目 v0 同步启动。'
-draft: true
 tags: ['ai-agent', 'go', '学习笔记']
 ---
 
