@@ -2,7 +2,6 @@
 title: 'AI Agent 从零学（三）：Workflow 和 Agent 的边界，用一次失败实验讲清'
 pubDate: 2026-09-23
 description: '同一任务两种实现：固定管线在真实 API 上先跪了，自主循环也踩了协议坑。附 Agent 状态结构与重试/超时的生产化改造（data-agent v1）。'
-draft: true
 tags: ['ai-agent', 'go', '学习笔记']
 ---
 
