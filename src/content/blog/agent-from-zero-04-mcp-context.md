@@ -82,7 +82,7 @@ go test -tags=integration ./internal/mcpserver \
 | baseline | 511 | 511 | 0.0% | 10 → 10 | valid | 无变换 |
 | truncate | 511 | 37 | -92.8% | 10 → 3 | valid | 移除 7 条 |
 | summarize（controlled fixture） | 511 | 338 | -33.9% | 10 → 6 | valid | summary usage 100/24 tokens，5ms |
-| offload | 511 | 560 | +9.6% | 10 → 10 | valid | 2 文件，原文 735 bytes |
+| offload | 511 | 549 | +7.4% | 10 → 10 | valid | 2 文件，原文 735 bytes；目录来自 `mktemp -d` |
 
 结果里最有价值的是 offload 反例：120-byte preview 加上 path、hash 等引用元数据后，估算上下文反而增加。**把内容写到文件不等于自动节省模型输入**；阈值和 preview 必须按真实数据测量。
 
