@@ -58,13 +58,16 @@ spawn server
 
 schema/table 元数据查询使用参数；schema 在执行前检查 allowlist。生产环境仍要使用最小权限账号：只读事务是重要边界，但不是完整 SQL 沙箱。
 
-协议级测试实际发现了 3 个工具，并成功调用 typed handler；真实 stdio + PostgreSQL 的 integration test 也覆盖 discovery 和 `SELECT 1`。本次收尾机器没有运行 Docker daemon，所以该 tagged test 只完成编译，没有把未执行的数据库结果写成“实测通过”。可复现命令是：
+真实 PostgreSQL 17 + stdio integration smoke 的观测结果：
 
-```bash
-TEST_DATABASE_URL='postgres://postgres:agent123@127.0.0.1:5432/agent?sslmode=disable' \
-go test -tags=integration ./internal/mcpserver \
-  -run 'TestPostgresSource|TestStdioServer' -v
+```text
+fixture: 8 rows
+totals: 华东 5700.50 / 华北 5450.00 / 华南 6620.00
+PASS: row limit / 2s timeout / write rejection / schema rejection
+PASS: 3-tool stdio discovery / query_readonly SELECT 1
 ```
+
+测试由官方 SDK `CommandTransport` 启动真实 `data-agent-mcp` 进程。协议级错误测试还验证了一次业务错误返回 `isError=true` 后，同一 MCP 会话仍可继续调用。
 
 ## 四、Context Engineering：四种策略同基线对照
 
