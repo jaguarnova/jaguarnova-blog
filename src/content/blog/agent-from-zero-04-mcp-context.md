@@ -50,13 +50,14 @@ spawn server
 | `describe_table` | `schema`、`table` | 列名、类型、可空性 |
 | `query_readonly` | `query` | 列、行、是否因上限截断 |
 
-`query_readonly` 不靠 `strings.HasPrefix(query, "SELECT")` 保护数据。真正的执行边界是 PostgreSQL `READ ONLY` 事务，同时在事务内设置：
+`query_readonly` 不靠 `strings.HasPrefix(query, "SELECT")` 保护数据。真正的执行边界首先是 PostgreSQL `READ ONLY` 事务。每次执行还会：
 
-- `statement_timeout`，限制查询执行时间；
-- allowlist `search_path`，约束默认 schema；
-- `MCP_MAX_ROWS`，限制返回给模型的行数。
+- 设置 `statement_timeout`，并用 context deadline 同时约束元数据和查询；
+- 设置 allowlist `search_path`，约束未限定名称；
+- 先运行 `EXPLAIN (VERBOSE, FORMAT JSON)`，拒绝执行计划中来自 allowlist 外 schema 的关系；
+- 应用 `MCP_MAX_ROWS`，限制返回给模型的行数。
 
-schema/table 元数据查询使用参数；schema 在执行前检查 allowlist。生产环境仍要使用最小权限账号：只读事务是重要边界，但不是完整 SQL 沙箱。
+schema/table 元数据查询使用参数；schema 在执行前检查 allowlist。生产环境仍要使用最小权限账号：只读事务与执行计划检查是重要边界，但不是完整 SQL 沙箱。
 
 真实 PostgreSQL 17 + stdio integration smoke 的观测结果：
 
