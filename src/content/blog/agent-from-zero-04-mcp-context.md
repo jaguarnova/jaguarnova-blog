@@ -1,87 +1,139 @@
 ---
-title: 'AI Agent 从零学（四）：MCP 接入与上下文工程'
-pubDate: 2026-09-23
-description: '手写 MCP Client 对接官方 filesystem server（14 个工具零实现接入），再手写 token 估算、历史裁剪与配对保护——上下文不再靠运气。'
-draft: true
+title: 'AI Agent 从零学（四）：MCP Server 与四种上下文策略'
+pubDate: 2026-10-16
+description: '从手写 MCP Client 到官方 Go SDK 数据分析 Server，并量化比较 baseline、truncation、summarization 与 offloading。'
 tags: ['ai-agent', 'go', '学习笔记', 'mcp']
 ---
 
-系列第五篇，两个主题一套逻辑：**Agent 的能力边界（工具从哪来）和资源边界（上下文怎么管）**。代码在 [agent-lab/ch04](https://github.com/jaguarnova/agent-lab/tree/main/ch04) 与 [data-agent v2](https://github.com/jaguarnova/data-agent)。
+系列第五篇，阶段四解决两个边界问题：工具如何跨进程复用，以及消息历史增长后如何控制上下文。代码分别在 [agent-lab/ch04](https://github.com/jaguarnova/agent-lab/tree/main/ch04) 和 [data-agent](https://github.com/jaguarnova/data-agent)。
 
-## 一、MCP：一份 schema，两边通用
+## 一、先手写 Client：理解 MCP 会话
 
-MCP（Model Context Protocol）用一句话说清：**把"工具怎么声明"标准化，让工具的"怎么实现"可以被复用**。它的工具定义（`inputSchema`）和 OpenAI 的 `parameters` 是同一个 JSON Schema 格式——这就是"同构"的含义：Agent 核心根本不关心工具来自本进程还是 MCP server。
+最初的练习是一个约 200 行、零 SDK 依赖的 stdio Client。它把 MCP 生命周期拆成四步：
 
-手写一个最小 Client（[源码](https://github.com/jaguarnova/agent-lab/blob/main/ch04/07_mcp_client/main.go)，约 200 行，零依赖）只要四步：
-
-```
-① spawn server（stdio 子进程）           ← 传输层：stdin/stdout 各一条管道，一行一条 JSON
-② initialize → initialized              ← 握手：协商协议版本（日期命名，如 2024-11-05）
-③ tools/list                            ← 发现：server 报告自己有哪些工具
-④ tools/call {name, arguments}          ← 执行：转发调用，拿回 content[].text
+```text
+spawn server
+  → initialize / initialized
+  → tools/list
+  → tools/call
 ```
 
-协议 underneath 就是 JSON-RPC 2.0：请求带自增 id，响应用同 id 配对，通知（如 `initialized`）没有 id。**没有鉴权、没有重连、没有压缩**——协议本身极薄，全部复杂度在 server 侧。
+底层是 JSON-RPC 2.0：请求用 `id` 关联响应，notification 没有 `id`，工具参数由 `inputSchema` 描述。这个练习的价值不是维护另一套 SDK，而是看清握手、能力发现、调用和子进程生命周期。
 
-## 二、实测：14 个工具，零行实现
+当时连接官方 filesystem server 的实测输出是：
 
-接官方 `@modelcontextprotocol/server-filesystem`（`npx` 拉起，一条命令）：
-
-```
+```text
 ✓ 握手完成，server: secure-filesystem-server 0.2.0
 ✓ 发现 14 个工具：read_text_file / write_file / edit_file / directory_tree
                     / search_files / move_file / get_file_info ...
 ✓ 调用 read_file → module github.com/jaguarnova/agent-lab ...
 ```
 
-我的 Client **没有实现任何文件逻辑**。安全边界由 server 执行：启动时限定目录，越界访问被 server 拒绝。
+接入主 Agent 后，模型在 4 轮内完成 3 次工具调用，混用了本地 `sql_query` 和 MCP 的 `list_directory`、`read_text_file`。两种来源进入同一个 `agent.Tool` 集合；模型只依据 name、description 和 schema 选择。
 
-然后接入 data-agent v2：MCP 工具适配进统一的 `agent.Tool`（schema 直接透传），与本地 `sql_query` 并列。实测问题"销售最高区域 + 读 go.mod"：
+## 二、工程实现改用官方 Go SDK
 
+理解协议后继续维护手写 JSON-RPC 没有收益。当前数据 MCP Server 固定使用官方 `github.com/modelcontextprotocol/go-sdk` v1.7.0：
+
+- SDK 负责 initialize、capability、JSON-RPC 帧和 typed tool schema；
+- 业务层只实现 `DataSource`，协议 handler 不直接依赖 PostgreSQL；
+- 进程内 transport 测试验证 discovery、structured content、错误结果和错误后的会话可继续使用；
+- `cmd/data-agent-mcp` 使用 stdio，stdout 只写协议，诊断写 stderr。
+
+这是一条干净的边界：SDK 管协议，`PostgresSource` 管数据库语义，`main` 管环境配置和生命周期。
+
+## 三、三个数据工具与只读边界
+
+| Tool | 输入 | 结果 |
+|---|---|---|
+| `list_tables` | 无 | allowlist schema 中的表和视图 |
+| `describe_table` | `schema`、`table` | 列名、类型、可空性 |
+| `query_readonly` | `query` | 列、行、是否因上限截断 |
+
+`query_readonly` 不靠 `strings.HasPrefix(query, "SELECT")` 保护数据。真正的执行边界首先是 PostgreSQL `READ ONLY` 事务。每次执行还会：
+
+- 设置 `statement_timeout`，并用 context deadline 同时约束元数据和查询；
+- 设置 allowlist `search_path`，约束未限定名称；
+- 先运行 `EXPLAIN (VERBOSE, FORMAT JSON)`，拒绝执行计划中来自 allowlist 外 schema 的关系；
+- 应用 `MCP_MAX_ROWS`，限制返回给模型的行数。
+
+schema/table 元数据查询使用参数；schema 在执行前检查 allowlist。生产环境仍要使用最小权限账号：只读事务与执行计划检查是重要边界，但不是完整 SQL 沙箱。
+
+真实 PostgreSQL 17 + stdio integration smoke 的观测结果：
+
+```text
+fixture: 8 rows
+totals: 华东 5700.50 / 华北 5450.00 / 华南 6620.00
+PASS: row limit / 2s timeout / write rejection / schema rejection
+PASS: 3-tool stdio discovery / query_readonly SELECT 1
 ```
---- MCP: 接入 14 个工具 ---
-4 轮、3 次工具调用全成功：模型自己混用了本地 sql_query 和 MCP 的
-list_directory / read_text_file——它不区分工具来源，只看 description。
+
+测试由官方 SDK `CommandTransport` 启动真实 `data-agent-mcp` 进程。协议级错误测试还验证了一次业务错误返回 `isError=true` 后，同一 MCP 会话仍可继续调用。
+
+## 四、Context Engineering：四种策略同基线对照
+
+实验固定使用同一份 10 条消息历史，包含两组完整 assistant/tool 配对。Token 是统一启发式估算，目的只是比较策略，不是供应商计费数字。
+
+- **baseline**：原样保留，提供共同基线。
+- **truncate**：保留首条 system 和最新完整原子组；预算不足也不拆 tool 配对。
+- **summarize**：把旧的完整组交给真实 `Summarizer` 接口，插入一条 history summary，再保留最近完整组。
+- **offload**：把超过阈值的 tool 结果写入内容寻址文件，消息中保留引用、SHA-256 和 preview。
+
+离线命令实际输出如下。summarize 行明确来自 **controlled summarizer fixture**：本机没有配置 `OPENAI_API_KEY`，因此没有声称调用过托管模型；HTTP adapter 另由 `httptest` 覆盖成功、HTTP 错误、坏 JSON、缺 choice 和空内容。
+
+| 策略 | Tokens before | Tokens after | 变化 | Messages | Pairing | 附加观测 |
+|---|---:|---:|---:|---:|---|---|
+| baseline | 511 | 511 | 0.0% | 10 → 10 | valid | 无变换 |
+| truncate | 511 | 37 | -92.8% | 10 → 3 | valid | 移除 7 条 |
+| summarize（controlled fixture） | 511 | 338 | -33.9% | 10 → 6 | valid | summary usage 100/24 tokens，5ms |
+| offload | 511 | 549 | +7.4% | 10 → 10 | valid | 2 文件，原文 735 bytes；目录来自 `mktemp -d` |
+
+结果里最有价值的是 offload 反例：120-byte preview 加上 path、hash 等引用元数据后，估算上下文反而增加。**把内容写到文件不等于自动节省模型输入**；阈值和 preview 必须按真实数据测量。
+
+## 五、配对完整性与原子写入
+
+裁剪和摘要都以完整消息组为单位。assistant 声明的全部 tool call 必须紧跟对应 tool result；孤立结果、缺失结果和重复 ID 都会被拒绝。即使 system + 最新组本身已超过预算，策略也保留协议有效性，并报告实际 token，而不是生成一个更短但无法发送的历史。
+
+offload 使用原文 SHA-256 作为文件名。写入流程是临时文件 → `Sync` → `Close` → `Rename`；目标已存在时重新计算 hash 后复用。所有写入成功前只修改消息副本，因此目录错误或写入失败不会污染调用者的原始历史。
+
+## 六、映射到 LangGraph 思维
+
+阶段四不引入 Python 或 LangGraph 运行依赖，只把现有 Go 循环映射为显式状态图：
+
+```mermaid
+stateDiagram-v2
+    [*] --> PrepareContext
+    PrepareContext --> CallModel
+    PrepareContext --> Failed: 策略失败
+    CallModel --> ExecuteTools: 有 tool_calls
+    CallModel --> Completed: 无 tool_calls
+    CallModel --> Failed: 请求或重试失败
+    ExecuteTools --> PrepareContext
+    ExecuteTools --> Failed: Context 取消
 ```
 
-**选型结论更新**：通用工具（文件、网页、GitHub）用生态版；带业务语义的工具（只读 SQL + 表结构知识 + 安全约束）自己写。两钟来源在同一个 Agent 里共存，因为对模型来说它们长得一样。
+| LangGraph | Go implementation |
+|---|---|
+| State | `[]agent.Message`, `agent.State`, `agent.Stats` |
+| PrepareContext node | `agent.ApplyContext` before each model call |
+| CallModel node | HTTP Chat Completions request in `agent.Run` |
+| ExecuteTools node | `runTool` loop appending tool messages |
+| Conditional edge | `len(msg.ToolCalls) == 0` selects completion or tools |
+| Terminal states | `completed`, `max_rounds`, `error` |
 
-## 三、Context Engineering：messages 不会自己变短
+Checkpoint/Resume 需要持久化状态，延后到 Memory/生产化阶段。本阶段不做只能在进程内“看起来像恢复”的占位实现。
 
-多轮 Agent 的上下文是单调递增的：每轮追加 assistant、tool 结果（SQL 结果动辄几 KB），tokens 线性上涨直到超窗或烧钱。data-agent 实测一次 4 轮任务就 10634 tokens。
+## 七、限制与决策
 
-手写两个工程手段（[源码](https://github.com/jaguarnova/data-agent/blob/main/internal/agent/context.go)）：
+1. Token 是字符和协议开销的估算值，不能替代供应商 usage 或账单。
+2. Summary 会丢信息；缺少 Evaluation 时，不把它设为主项目默认策略。
+3. Offloading 会产生本地文件，而且本次参数下没有减少上下文，所以不在主 Agent 默认启用。
+4. 主项目只公开 `truncate` 和 `none`；前者默认预算 8000，后者用于对照。
+5. 符合规范的 stdio MCP Server 必须让 stdout 保持协议纯净，日志写 stderr；Client 不应靠跳过任意非 JSON stdout 来掩盖 server 错误。
 
-### 1. Token 估算 + usage 校准
+## 八、下一步：Eino
 
-精确分词需要 tokenizer（Go 没有官方 tiktoken），但"逼近上限就裁剪"不需要精确——按字符数估算（初始 2.5 字符/token）误差 ±20% 完全够用，且**每次 API 响应的真实 `usage.prompt_tokens` 会反向校准估算系数**（指数平滑 0.7/0.3），跑得越久估得越准。
-
-### 2. 滑动窗口裁剪，带配对保护
-
-裁剪不是简单砍掉最旧的消息——**tool 结果必须和发起它的 assistant(tool_calls) 一起保留**，否则服务端 400（id 配对断裂，上一篇踩过的坑）。裁剪算法：
-
-```
-从尾部保留最近 N 条
-  ↓ tool 消息被保留时，连带保留它配对的 assistant 消息
-  ↓ 首条 system 消息始终保留（工具声明和人格都在里面）
-```
-
-三个单测锁定行为：不超限不裁、超限保留 system+最近消息、**配对不拆散**。data-agent 每轮请求前自动检查，`MAX_CONTEXT_TOKENS` 环境变量设预算（默认 8000），运行结束打印 `truncations=N`。
-
-### 3. 没做的：摘要（Summarization）
-
-被裁掉的内容其实是"摘要替换"的好素材（用一次廉价 LLM 调用换信息保留），但当前阶段不值得——先用最便宜的截断，等真实任务里出现"裁掉的信息被再次需要"的 case 再上摘要。**上下文策略也是要按证据演进的，不是一次做全。**
-
-## 四、踩坑实录
-
-1. **MCP stdio 的响应可能混入非 JSON 行**（server 日志），解析要跳过而不是报错
-2. **握手前工具不可用**：`initialized` 通知不发，`tools/list` 会挂——MCP 是有状态的会话，不像 HTTP 无状态
-3. **估算器的初始比例影响首轮裁剪**：校准需要真实 usage，而校准发生在请求后——第一轮只能靠先验假设，预算要留余量
-4. **MCP 工具的 description 质量参差**（Anthropic 那篇提过）：filesystem server 自己标了 `read_file DEPRECATED`——发现工具后要过滤弃用项，否则模型会优先选它
-
-## 五、下一步
-
-阶段五：Eino。把手写的循环、工具编排迁移到框架，同时保留现有 MCP 工具与 Context 策略——验证"框架之下是什么"的时刻到了。
+阶段五会评估 Eino 如何承接现有 `State`、工具和 Context 边界。判断标准不是“代码是否更短”，而是测试 seam、错误语义、可观测状态和协议约束能否保留。在这之前不提前加入 RAG、Memory 或 Evaluation。
 
 ---
 
